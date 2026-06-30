@@ -1003,30 +1003,6 @@ export default function FluidCanvas() {
       }
     };
 
-    // Ambient self-driven flow: phones have no cursor, so without this the
-    // intro bloom would fade to flat "water" and look static. Trace a slow
-    // wandering source that keeps emitting a little ink every frame.
-    let ambientAccum = 0;
-    const ambientEmit = (canvas: HTMLCanvasElement, now: number, dt: number) => {
-      ambientAccum += dt;
-      if (ambientAccum < 0.09) return;
-      ambientAccum = 0;
-      const t = now * 0.001;
-      const aspect = canvas.width / canvas.height || 1;
-      const sx = aspect > 1 ? 1 : 1 / aspect;
-      const sy = aspect > 1 ? aspect : 1;
-      const x = 0.5 + 0.26 * Math.sin(t * 0.34) * sx;
-      const y = 0.5 + 0.2 * Math.cos(t * 0.47) * sy;
-      splatQueue.push({
-        x,
-        y,
-        dx: Math.cos(t * 0.34) * 260,
-        dy: -Math.sin(t * 0.47) * 260,
-        amount: INK_STRENGTH * 0.55,
-        radius: SPLAT_RADIUS * 1.7,
-      });
-    };
-
     // ---- lifecycle state --------------------------------------------------
     let sim: Simulation | null = null;
     let running = false;
@@ -1056,8 +1032,6 @@ export default function FluidCanvas() {
       const now = performance.now();
       const dt = Math.min((now - lastTime) / 1000, 1 / 60);
       lastTime = now;
-
-      ambientEmit(sim.canvas, now, dt);
 
       while (splatQueue.length > 0) {
         const s = splatQueue.shift()!;

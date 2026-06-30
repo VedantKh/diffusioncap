@@ -58,32 +58,4 @@ body {
     0% 0%,
     100% 0%,
     50% 100%;
-  animation: fluid-drift 30s ease-in-out infinite alternate;
-}
-
-@keyframes fluid-drift {
-  0% {
-    background-position:
-      0% 0%,
-      100% 0%,
-      50% 100%;
-  }
-  50% {
-    background-position:
-      32% 42%,
-      68% 28%,
-      40% 66%;
-  }
-  100% {
-    background-position:
-      62% 18%,
-      38% 64%,
-      60% 40%;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .fluid-fallback {
-    animation: none;
-  }
 }
