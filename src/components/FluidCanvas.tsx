@@ -67,11 +67,81 @@ export default function FluidCanvas() {
     });
     if (!gl) {
       console.warn("WebGL2 not available; fluid background disabled.");
+      // Avoid leaving an opaque black canvas covering the page.
+      canvas.style.display = "none";
       return;
     }
 
+    // Float render targets need an explicit color-buffer extension. iOS Safari
+    // (and some Android GPUs) only expose the half-float variant, so request
+    // both; without one of these, half-float framebuffers are incomplete and
+    // every draw silently no-ops, leaving a black canvas.
     gl.getExtension("EXT_color_buffer_float");
+    gl.getExtension("EXT_color_buffer_half_float");
     gl.disable(gl.BLEND);
+
+    // Probe whether a given texture format is actually color-renderable on this
+    // device, falling back to a wider-channel format when it is not. Many
+    // mobile GPUs cannot render to single/dual-channel half-float textures even
+    // when the extension is present.
+    const supportRenderTextureFormat = (
+      internalFormat: number,
+      format: number,
+      type: number,
+    ) => {
+      const texture = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, 4, 4, 0, format, type, null);
+      const fbo = gl.createFramebuffer()!;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(
+        gl.FRAMEBUFFER,
+        gl.COLOR_ATTACHMENT0,
+        gl.TEXTURE_2D,
+        texture,
+        0,
+      );
+      const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.deleteFramebuffer(fbo);
+      gl.deleteTexture(texture);
+      return status === gl.FRAMEBUFFER_COMPLETE;
+    };
+
+    const getSupportedFormat = (
+      internalFormat: number,
+      format: number,
+      type: number,
+    ): { internalFormat: number; format: number } | null => {
+      if (!supportRenderTextureFormat(internalFormat, format, type)) {
+        switch (internalFormat) {
+          case gl.R16F:
+            return getSupportedFormat(gl.RG16F, gl.RG, type);
+          case gl.RG16F:
+            return getSupportedFormat(gl.RGBA16F, gl.RGBA, type);
+          default:
+            return null;
+        }
+      }
+      return { internalFormat, format };
+    };
+
+    const halfFloat = gl.HALF_FLOAT;
+    const formatRGBA = getSupportedFormat(gl.RGBA16F, gl.RGBA, halfFloat);
+    const formatRG = getSupportedFormat(gl.RG16F, gl.RG, halfFloat);
+    const formatR = getSupportedFormat(gl.R16F, gl.RED, halfFloat);
+
+    if (!formatRGBA || !formatRG || !formatR) {
+      console.warn(
+        "No renderable half-float format; fluid background disabled.",
+      );
+      canvas.style.display = "none";
+      return;
+    }
 
     // ---- shader / program helpers -----------------------------------------
     const compileShader = (type: number, source: string) => {
@@ -466,45 +536,45 @@ export default function FluidCanvas() {
 
       const simRes = getResolution(SIM_RESOLUTION);
       const dyeRes = getResolution(DYE_RESOLUTION);
-      const type = gl.HALF_FLOAT;
+      const type = halfFloat;
 
       dye = createDoubleFBO(
         dyeRes.width,
         dyeRes.height,
-        gl.R16F,
-        gl.RED,
+        formatR.internalFormat,
+        formatR.format,
         type,
         gl.LINEAR,
       );
       velocity = createDoubleFBO(
         simRes.width,
         simRes.height,
-        gl.RG16F,
-        gl.RG,
+        formatRG.internalFormat,
+        formatRG.format,
         type,
         gl.LINEAR,
       );
       divergence = createFBO(
         simRes.width,
         simRes.height,
-        gl.R16F,
-        gl.RED,
+        formatR.internalFormat,
+        formatR.format,
         type,
         gl.NEAREST,
       );
       curl = createFBO(
         simRes.width,
         simRes.height,
-        gl.R16F,
-        gl.RED,
+        formatR.internalFormat,
+        formatR.format,
         type,
         gl.NEAREST,
       );
       pressure = createDoubleFBO(
         simRes.width,
         simRes.height,
-        gl.R16F,
-        gl.RED,
+        formatR.internalFormat,
+        formatR.format,
         type,
         gl.NEAREST,
       );
