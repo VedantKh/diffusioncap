@@ -136,26 +136,30 @@ export default function FluidCanvas() {
     };
 
     const halfFloat = gl.HALF_FLOAT;
-    const formatRGBA = getSupportedFormat(gl.RGBA16F, gl.RGBA, halfFloat);
-    const formatRG = getSupportedFormat(gl.RG16F, gl.RG, halfFloat);
-    const formatR = getSupportedFormat(gl.R16F, gl.RED, halfFloat);
-
-    console.log("[fluid] renderable formats", {
-      rgba: !!formatRGBA,
-      rg: !!formatRG,
-      r: !!formatR,
-      isContextLost: gl.isContextLost(),
-    });
-
-    if (!formatRGBA || !formatRG || !formatR) {
-      console.warn(
-        "No renderable half-float format; fluid background disabled.",
-        "isContextLost =",
-        gl.isContextLost(),
-      );
-      canvas.style.display = "none";
-      return;
-    }
+    // Formats are resolved lazily: when the context is born lost (common on
+    // iOS in Low Power Mode / when too many WebGL contexts are alive), the
+    // probe returns nothing, so we wait and resolve again once the context is
+    // actually usable instead of permanently disabling the canvas.
+    type Fmt = { internalFormat: number; format: number };
+    let formatR!: Fmt;
+    let formatRG!: Fmt;
+    const resolveFormats = () => {
+      // RGBA is the ultimate fallback target; if even it isn't renderable the
+      // context isn't usable (typically because it's lost).
+      const rgba = getSupportedFormat(gl.RGBA16F, gl.RGBA, halfFloat);
+      const rg = getSupportedFormat(gl.RG16F, gl.RG, halfFloat);
+      const r = getSupportedFormat(gl.R16F, gl.RED, halfFloat);
+      console.log("[fluid] renderable formats", {
+        rgba: !!rgba,
+        rg: !!rg,
+        r: !!r,
+        isContextLost: gl.isContextLost(),
+      });
+      if (!rgba || !rg || !r) return false;
+      formatRG = rg;
+      formatR = r;
+      return true;
+    };
 
     // Mobile GPUs have far less headroom and aggressively drop the WebGL
     // context under memory pressure. Use a smaller simulation/dye grid and a
@@ -191,7 +195,7 @@ export default function FluidCanvas() {
       }
       return uniforms;
     };
-
+    
     const createProgram = (vs: string, fs: string): Program => {
       const program = gl.createProgram()!;
       gl.attachShader(program, compileShader(gl.VERTEX_SHADER, vs));
@@ -640,8 +644,8 @@ export default function FluidCanvas() {
       return false;
     };
 
-    resizeCanvas();
-    createGLResources();
+    // Resources/loop are created in start(), which only runs once the context
+    // is confirmed usable (see below).
 
     // ---- simulation passes -------------------------------------------------
     const correctRadius = (radius: number) => {
@@ -882,12 +886,12 @@ export default function FluidCanvas() {
         });
       }
     };
-    introBloom();
 
     // ---- main loop ---------------------------------------------------------
     let lastTime = performance.now();
     let rafId = 0;
     let running = true;
+    let started = false;
 
     // Ambient self-driven flow: phones have no cursor, so without this the
     // intro bloom would fade to flat "water" and look static. Trace a slow
@@ -934,26 +938,63 @@ export default function FluidCanvas() {
       rafId = requestAnimationFrame(frame);
     };
 
+    // Build all GPU resources and start the loop. Only succeeds when the
+    // context is actually usable; returns false otherwise so the caller can
+    // wait for the context to recover.
+    const start = () => {
+      if (started || gl.isContextLost()) return false;
+      if (!resolveFormats()) return false;
+      canvas.style.display = "";
+      resizeCanvas();
+      createGLResources();
+      introBloom();
+      running = true;
+      lastTime = performance.now();
+      rafId = requestAnimationFrame(frame);
+      started = true;
+      console.log("[fluid] simulation started");
+      return true;
+    };
+
     // TEMP debug: deterministic single render for headless verification
     const debugStill =
       typeof window !== "undefined" &&
       window.location.search.includes("still");
     if (debugStill) {
-      const params = new URLSearchParams(window.location.search);
-      const steps = parseInt(params.get("steps") || "6", 10);
-      splat(0.5, 0.5, 0, 0, 0.8, SPLAT_RADIUS * 5);
-      for (let i = 0; i < steps; i++) step(1 / 60);
-      render();
-    } else {
-      console.log("[fluid] init complete; starting render loop");
-      rafId = requestAnimationFrame(frame);
+      if (resolveFormats()) {
+        resizeCanvas();
+        createGLResources();
+        const params = new URLSearchParams(window.location.search);
+        const steps = parseInt(params.get("steps") || "6", 10);
+        splat(0.5, 0.5, 0, 0, 0.8, SPLAT_RADIUS * 5);
+        for (let i = 0; i < steps; i++) step(1 / 60);
+        render();
+      }
+    } else if (!start()) {
+      // Context was born lost (e.g. iOS Low Power Mode / context limit). Keep
+      // the canvas hidden and keep retrying; webglcontextrestored (below) will
+      // also kick off start() if/when the browser hands us a live context.
+      console.warn(
+        "[fluid] context not usable yet (isContextLost =",
+        gl.isContextLost(),
+        "); will retry / await restore",
+      );
+      canvas.style.display = "none";
+      let attempts = 0;
+      const retry = () => {
+        if (started) return;
+        if (start()) return;
+        if (++attempts < 10) setTimeout(retry, 400);
+        else console.warn("[fluid] gave up after retries; canvas disabled");
+      };
+      setTimeout(retry, 400);
     }
 
     const onVisibility = () => {
       if (document.hidden) {
         running = false;
         cancelAnimationFrame(rafId);
-      } else if (!running) {
+      } else if (!running && started && !gl.isContextLost()) {
         running = true;
         lastTime = performance.now();
         rafId = requestAnimationFrame(frame);
@@ -973,7 +1014,14 @@ export default function FluidCanvas() {
       cancelAnimationFrame(rafId);
     };
     const onContextRestored = () => {
-      console.log("[fluid] webglcontextrestored event fired; rebuilding");
+      console.log("[fluid] webglcontextrestored event fired");
+      // If we never managed to start (born-lost context), do a full start now.
+      if (!started) {
+        start();
+        return;
+      }
+      if (!resolveFormats()) return;
+      canvas.style.display = "";
       createGLResources();
       running = true;
       lastTime = performance.now();
@@ -993,35 +1041,43 @@ export default function FluidCanvas() {
       canvas.removeEventListener("webglcontextlost", onContextLost);
       canvas.removeEventListener("webglcontextrestored", onContextRestored);
 
-      [
-        splatProgram,
-        advectionProgram,
-        divergenceProgram,
-        curlProgram,
-        vorticityProgram,
-        pressureProgram,
-        gradientProgram,
-        clearProgram,
-        displayProgram,
-      ].forEach((p) => gl.deleteProgram(p.program));
+      // Resources only exist if start() ran; guard so a never-started (born
+      // lost) context doesn't throw during cleanup.
+      if (started && !gl.isContextLost()) {
+        [
+          splatProgram,
+          advectionProgram,
+          divergenceProgram,
+          curlProgram,
+          vorticityProgram,
+          pressureProgram,
+          gradientProgram,
+          clearProgram,
+          displayProgram,
+        ].forEach((p) => gl.deleteProgram(p.program));
 
-      if (dye) {
-        deleteFBO(dye.read);
-        deleteFBO(dye.write);
+        if (dye) {
+          deleteFBO(dye.read);
+          deleteFBO(dye.write);
+        }
+        if (velocity) {
+          deleteFBO(velocity.read);
+          deleteFBO(velocity.write);
+        }
+        if (divergence) deleteFBO(divergence);
+        if (curl) deleteFBO(curl);
+        if (pressure) {
+          deleteFBO(pressure.read);
+          deleteFBO(pressure.write);
+        }
+        gl.deleteBuffer(quadBuffer);
+        gl.deleteBuffer(indexBuffer);
+        gl.deleteVertexArray(vao);
       }
-      if (velocity) {
-        deleteFBO(velocity.read);
-        deleteFBO(velocity.write);
-      }
-      if (divergence) deleteFBO(divergence);
-      if (curl) deleteFBO(curl);
-      if (pressure) {
-        deleteFBO(pressure.read);
-        deleteFBO(pressure.write);
-      }
-      gl.deleteBuffer(quadBuffer);
-      gl.deleteBuffer(indexBuffer);
-      gl.deleteVertexArray(vao);
+
+      // Explicitly release the WebGL context so we don't leak it into Safari's
+      // limited pool of live contexts (a cause of born-lost contexts on iOS).
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
     };
   }, []);
 
