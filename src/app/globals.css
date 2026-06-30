@@ -24,3 +24,66 @@ body {
   overflow: hidden;
   overscroll-behavior: none;
 }
+
+/*
+ * Non-WebGL fallback background. Always rendered behind the simulation canvas
+ * so the page is never blank while WebGL is initializing / retrying, and so a
+ * phone that refuses a usable WebGL context still gets a tasteful, on-brand
+ * "ink in water" backdrop. Pure CSS — needs no GPU context of its own.
+ */
+.fluid-fallback {
+  background:
+    radial-gradient(
+      55% 55% at 28% 30%,
+      rgba(54, 160, 247, 0.32),
+      transparent 70%
+    ),
+    radial-gradient(
+      50% 50% at 76% 62%,
+      rgba(8, 51, 158, 0.24),
+      transparent 70%
+    ),
+    radial-gradient(
+      65% 65% at 52% 88%,
+      rgba(120, 180, 250, 0.22),
+      transparent 72%
+    ),
+    var(--background);
+  background-size:
+    200% 200%,
+    185% 185%,
+    220% 220%,
+    100% 100%;
+  background-position:
+    0% 0%,
+    100% 0%,
+    50% 100%;
+  animation: fluid-drift 30s ease-in-out infinite alternate;
+}
+
+@keyframes fluid-drift {
+  0% {
+    background-position:
+      0% 0%,
+      100% 0%,
+      50% 100%;
+  }
+  50% {
+    background-position:
+      32% 42%,
+      68% 28%,
+      40% 66%;
+  }
+  100% {
+    background-position:
+      62% 18%,
+      38% 64%,
+      60% 40%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fluid-fallback {
+    animation: none;
+  }
+}
