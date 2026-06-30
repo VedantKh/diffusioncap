@@ -61,7 +61,7 @@ const SPLAT_RADIUS = 0.0035;
 const SPLAT_FORCE = 6200;
 const INK_STRENGTH = 0.18; // dye added per pointer move
 const EDGE_DRAIN = 0.05; // extra fade near the tank edges
-const OUTWARD_DRIFT = 0.65; // how hard the tank sucks ink toward edges
+const OUTWARD_DRIFT = 0.25; // how hard the tank sucks ink toward edges
 
 // ---- Context lifecycle ------------------------------------------------------
 const MAX_ACQUIRE_ATTEMPTS = 8; // fresh-canvas attempts before the CSS fallback
@@ -954,25 +954,7 @@ export default function FluidCanvas() {
       updatePointer(e.clientX, e.clientY);
     };
 
-    const onPointerDown = (e: PointerEvent) => {
-      const rect = containerEl.getBoundingClientRect();
-      const x = (e.clientX - rect.left) / rect.width;
-      const y = 1 - (e.clientY - rect.top) / rect.height;
-      pointer.x = x;
-      pointer.y = y;
-      pointer.active = true;
-      splatQueue.push({
-        x,
-        y,
-        dx: 0,
-        dy: 0,
-        amount: INK_STRENGTH * 1.6,
-        radius: SPLAT_RADIUS * 1.5,
-      });
-    };
-
     window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
 
     // entrance bloom: an azure flourish that blooms across the tank and then
     // gets sucked toward the edges, so the page never loads empty.
@@ -1263,7 +1245,6 @@ export default function FluidCanvas() {
       clearTimeout(acquireTimer);
       clearTimeout(restoreWatchdog);
       window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("load", kickoff);
       document.removeEventListener("visibilitychange", onVisibility);
       teardownSession();
