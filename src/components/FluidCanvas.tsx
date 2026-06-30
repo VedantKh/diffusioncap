@@ -72,6 +72,11 @@ export default function FluidCanvas() {
       return;
     }
 
+    console.log(
+      "[fluid] webgl2 context created; isContextLost =",
+      gl.isContextLost(),
+    );
+
     // Float render targets need an explicit color-buffer extension. iOS Safari
     // (and some Android GPUs) only expose the half-float variant, so request
     // both; without one of these, half-float framebuffers are incomplete and
@@ -135,9 +140,18 @@ export default function FluidCanvas() {
     const formatRG = getSupportedFormat(gl.RG16F, gl.RG, halfFloat);
     const formatR = getSupportedFormat(gl.R16F, gl.RED, halfFloat);
 
+    console.log("[fluid] renderable formats", {
+      rgba: !!formatRGBA,
+      rg: !!formatRG,
+      r: !!formatR,
+      isContextLost: gl.isContextLost(),
+    });
+
     if (!formatRGBA || !formatRG || !formatR) {
       console.warn(
         "No renderable half-float format; fluid background disabled.",
+        "isContextLost =",
+        gl.isContextLost(),
       );
       canvas.style.display = "none";
       return;
@@ -875,6 +889,30 @@ export default function FluidCanvas() {
     let rafId = 0;
     let running = true;
 
+    // Ambient self-driven flow: phones have no cursor, so without this the
+    // intro bloom would fade to flat "water" and look static. Trace a slow
+    // wandering source that keeps emitting a little ink every frame.
+    let ambientAccum = 0;
+    const ambientEmit = (now: number, dt: number) => {
+      ambientAccum += dt;
+      if (ambientAccum < 0.09) return;
+      ambientAccum = 0;
+      const t = now * 0.001;
+      const aspect = canvas.width / canvas.height || 1;
+      const sx = aspect > 1 ? 1 : 1 / aspect;
+      const sy = aspect > 1 ? aspect : 1;
+      const x = 0.5 + 0.26 * Math.sin(t * 0.34) * sx;
+      const y = 0.5 + 0.2 * Math.cos(t * 0.47) * sy;
+      splatQueue.push({
+        x,
+        y,
+        dx: Math.cos(t * 0.34) * 260,
+        dy: -Math.sin(t * 0.47) * 260,
+        amount: INK_STRENGTH * 0.55,
+        radius: SPLAT_RADIUS * 1.7,
+      });
+    };
+
     const frame = () => {
       if (!running) return;
       if (resizeCanvas()) initFramebuffers();
@@ -882,6 +920,8 @@ export default function FluidCanvas() {
       const now = performance.now();
       const dt = Math.min((now - lastTime) / 1000, 1 / 60);
       lastTime = now;
+
+      ambientEmit(now, dt);
 
       // drain queued splats
       while (splatQueue.length > 0) {
@@ -905,6 +945,7 @@ export default function FluidCanvas() {
       for (let i = 0; i < steps; i++) step(1 / 60);
       render();
     } else {
+      console.log("[fluid] init complete; starting render loop");
       rafId = requestAnimationFrame(frame);
     }
 
@@ -927,10 +968,12 @@ export default function FluidCanvas() {
     // restored handler so the animation comes back instead of staying black.
     const onContextLost = (e: Event) => {
       e.preventDefault();
+      console.warn("[fluid] webglcontextlost event fired");
       running = false;
       cancelAnimationFrame(rafId);
     };
     const onContextRestored = () => {
+      console.log("[fluid] webglcontextrestored event fired; rebuilding");
       createGLResources();
       running = true;
       lastTime = performance.now();
