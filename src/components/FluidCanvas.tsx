@@ -143,6 +143,19 @@ export default function FluidCanvas() {
       return;
     }
 
+    // Mobile GPUs have far less headroom and aggressively drop the WebGL
+    // context under memory pressure. Use a smaller simulation/dye grid and a
+    // lower device-pixel-ratio cap there to stay well within budget.
+    const isMobile =
+      (typeof navigator !== "undefined" &&
+        ((navigator.maxTouchPoints || 0) > 0 ||
+          /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent))) ||
+      (typeof matchMedia !== "undefined" &&
+        matchMedia("(pointer: coarse)").matches);
+    const dyeResolution = isMobile ? 256 : DYE_RESOLUTION;
+    const simResolution = isMobile ? 96 : SIM_RESOLUTION;
+    const dprCap = isMobile ? 1.5 : 2;
+
     // ---- shader / program helpers -----------------------------------------
     const compileShader = (type: number, source: string) => {
       const shader = gl.createShader(type)!;
@@ -376,35 +389,55 @@ export default function FluidCanvas() {
       fragColor = vec4(color * vignette, 1.0);
     }`;
 
-    const splatProgram = createProgram(baseVertex, splatShader);
-    const advectionProgram = createProgram(baseVertex, advectionShader);
-    const divergenceProgram = createProgram(baseVertex, divergenceShader);
-    const curlProgram = createProgram(baseVertex, curlShader);
-    const vorticityProgram = createProgram(baseVertex, vorticityShader);
-    const pressureProgram = createProgram(baseVertex, pressureShader);
-    const gradientProgram = createProgram(baseVertex, gradientSubtractShader);
-    const clearProgram = createProgram(baseVertex, clearShader);
-    const displayProgram = createProgram(baseVertex, displayShader);
+    // All GPU resources (programs, buffers, VAO, framebuffers) live in these
+    // mutable bindings so they can be rebuilt if the WebGL context is lost and
+    // later restored — common on mobile GPUs under memory pressure.
+    let splatProgram!: Program;
+    let advectionProgram!: Program;
+    let divergenceProgram!: Program;
+    let curlProgram!: Program;
+    let vorticityProgram!: Program;
+    let pressureProgram!: Program;
+    let gradientProgram!: Program;
+    let clearProgram!: Program;
+    let displayProgram!: Program;
+    let vao!: WebGLVertexArrayObject;
+    let quadBuffer!: WebGLBuffer;
+    let indexBuffer!: WebGLBuffer;
 
-    // ---- full-screen quad --------------------------------------------------
-    const vao = gl.createVertexArray();
-    gl.bindVertexArray(vao);
-    const quadBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      new Float32Array([-1, -1, -1, 1, 1, 1, 1, -1]),
-      gl.STATIC_DRAW,
-    );
-    const indexBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-    gl.bufferData(
-      gl.ELEMENT_ARRAY_BUFFER,
-      new Uint16Array([0, 1, 2, 0, 2, 3]),
-      gl.STATIC_DRAW,
-    );
-    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-    gl.enableVertexAttribArray(0);
+    const createGLResources = () => {
+      splatProgram = createProgram(baseVertex, splatShader);
+      advectionProgram = createProgram(baseVertex, advectionShader);
+      divergenceProgram = createProgram(baseVertex, divergenceShader);
+      curlProgram = createProgram(baseVertex, curlShader);
+      vorticityProgram = createProgram(baseVertex, vorticityShader);
+      pressureProgram = createProgram(baseVertex, pressureShader);
+      gradientProgram = createProgram(baseVertex, gradientSubtractShader);
+      clearProgram = createProgram(baseVertex, clearShader);
+      displayProgram = createProgram(baseVertex, displayShader);
+
+      // ---- full-screen quad ------------------------------------------------
+      vao = gl.createVertexArray()!;
+      gl.bindVertexArray(vao);
+      quadBuffer = gl.createBuffer()!;
+      gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+      gl.bufferData(
+        gl.ARRAY_BUFFER,
+        new Float32Array([-1, -1, -1, 1, 1, 1, 1, -1]),
+        gl.STATIC_DRAW,
+      );
+      indexBuffer = gl.createBuffer()!;
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+      gl.bufferData(
+        gl.ELEMENT_ARRAY_BUFFER,
+        new Uint16Array([0, 1, 2, 0, 2, 3]),
+        gl.STATIC_DRAW,
+      );
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(0);
+
+      initFramebuffers();
+    };
 
     const blit = (target: FBO | null) => {
       if (target == null) {
@@ -534,8 +567,8 @@ export default function FluidCanvas() {
         deleteFBO(pressure.write);
       }
 
-      const simRes = getResolution(SIM_RESOLUTION);
-      const dyeRes = getResolution(DYE_RESOLUTION);
+      const simRes = getResolution(simResolution);
+      const dyeRes = getResolution(dyeResolution);
       const type = halfFloat;
 
       dye = createDoubleFBO(
@@ -581,7 +614,7 @@ export default function FluidCanvas() {
     };
 
     const resizeCanvas = () => {
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
       const w = Math.floor(canvas.clientWidth * dpr);
       const h = Math.floor(canvas.clientHeight * dpr);
       if (w === 0 || h === 0) return false;
@@ -594,7 +627,7 @@ export default function FluidCanvas() {
     };
 
     resizeCanvas();
-    initFramebuffers();
+    createGLResources();
 
     // ---- simulation passes -------------------------------------------------
     const correctRadius = (radius: number) => {
@@ -887,6 +920,26 @@ export default function FluidCanvas() {
     };
     document.addEventListener("visibilitychange", onVisibility);
 
+    // iOS Safari (and memory-constrained GPUs) can drop the WebGL context at
+    // any time. Once lost, every draw silently no-ops and the opaque canvas
+    // turns black. Calling preventDefault() in the lost handler tells the
+    // browser we intend to restore, then we rebuild every GPU resource in the
+    // restored handler so the animation comes back instead of staying black.
+    const onContextLost = (e: Event) => {
+      e.preventDefault();
+      running = false;
+      cancelAnimationFrame(rafId);
+    };
+    const onContextRestored = () => {
+      createGLResources();
+      running = true;
+      lastTime = performance.now();
+      introBloom();
+      rafId = requestAnimationFrame(frame);
+    };
+    canvas.addEventListener("webglcontextlost", onContextLost);
+    canvas.addEventListener("webglcontextrestored", onContextRestored);
+
     // ---- cleanup -----------------------------------------------------------
     return () => {
       running = false;
@@ -894,6 +947,8 @@ export default function FluidCanvas() {
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("visibilitychange", onVisibility);
+      canvas.removeEventListener("webglcontextlost", onContextLost);
+      canvas.removeEventListener("webglcontextrestored", onContextRestored);
 
       [
         splatProgram,
